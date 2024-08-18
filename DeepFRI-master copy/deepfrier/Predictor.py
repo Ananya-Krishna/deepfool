@@ -4,6 +4,7 @@ import glob
 import json
 import gzip
 import secrets
+from scipy.interpolate import interp1d
 
 import numpy as np
 import tensorflow as tf
@@ -241,18 +242,48 @@ class Predictor(object):
                     writer.writerow([prot, row[0], '{:.5f}'.format(row[2]), row[1]])
         csvFile.close()
 
+    def calc_sparsity(self, saliency_list):
+        non_zero_count = sum(1 for value in saliency_list if value != 0)
+        sparsity = 1 - (non_zero_count / len(saliency_list))
+        return sparsity
+    
+    def calc_fidelity(self, original_prediction, perturbed_prediction):
+        # Fidelity calculation logic
+        fidelity = np.abs(original_prediction - perturbed_prediction)
+        return np.mean(fidelity)
+    
+    def rescale_saliency_map(saliency_map, target_length):
+        x_original = np.linspace(0, 1, len(saliency_map))
+        x_target = np.linspace(0, 1, target_length)
+        f = interp1d(x_original, saliency_map, kind='linear')
+        return f(x_target)
+
+    def calc_contrastivity(self, saliency_list_1, saliency_list_2):
+        max_length = max(len(saliency_list_1), len(saliency_list_2))
+        rescaled_map_1 = rescale_saliency_map(saliency_list_1, max_length)
+        rescaled_map_2 = rescale_saliency_map(saliency_list_2, max_length)
+    
+        # Calculate contrastivity
+        contrastivity = np.abs(rescaled_map_1 - rescaled_map_2)
+        return np.mean(contrastivity)
+    
+    
+    def to_csv(self, my_list, filename):
+        with open(filename, 'w', newline='') as file:
+            writer = csv.writer(file)
+            for item in my_list:
+                writer.writerow([item])
+
     def compute_GradCAM(self, layer_name='GCNN_concatenate', use_guided_grads=False):
         print ("### Computing GradCAM for each function of every predicted protein...")
         gradcam = GradCAM(self.model, layer_name=layer_name)
-        grad_cam_scores = {}
-
+        
+        sparsity, fidelity, contrastivity = [], [], []
         self.pdb2cam = {}
         for go_indx in self.goidx2chains:
             pred_chains = list(self.goidx2chains[go_indx])
-            function_name = self.gonames[go_indx]  # Ensure this is the correct type (string)
-            if isinstance(function_name, bytes):
-                function_name = function_name.decode("utf-8")
             print ("### Computing gradCAM for ", self.gonames[go_indx], '... [# proteins=', len(pred_chains), ']')
+            prev_heatmap = None
             for chain in pred_chains:
                 if chain not in self.pdb2cam:
                     self.pdb2cam[chain] = {}
@@ -263,19 +294,19 @@ class Predictor(object):
                 self.pdb2cam[chain]['GO_ids'].append(self.goterms[go_indx])
                 self.pdb2cam[chain]['GO_names'].append(self.gonames[go_indx])
                 self.pdb2cam[chain]['sequence'] = self.data[chain][1]
-                self.pdb2cam[chain]['saliency_maps'].append(gradcam.heatmap(self.data[chain][0], go_indx, use_guided_grads=use_guided_grads).tolist())
-                #print(self.pdb2cam[chain]['saliency_maps'])
-                #print((self.data[chain][0], go_indx, use_guided_grads=use_guided_grads).tolist())
-                heatmap = gradcam.heatmap(self.data[chain][0], go_indx, use_guided_grads=use_guided_grads)
-                self.pdb2cam[chain]['saliency_maps'].append(heatmap.tolist())
-                
-                if self.gonames[go_indx] not in grad_cam_scores:
-                    grad_cam_scores[function_name] = []
-                grad_cam_scores[function_name].append(heatmap)
-                
-                #grad_cam_scores.append(heatmap)  # Append the heatmap (activation scores) to grad_cam_scores
-    
-        return grad_cam_scores if grad_cam_scores else None
+                heatmap = gradcam.heatmap(self.data[chain][0], go_indx, use_guided_grads=use_guided_grads).tolist()
+                self.pdb2cam[chain]['saliency_maps'].append(heatmap)
+                sparsity.append(self.calc_sparsity(heatmap))
+                original_prediction = self.Y_hat[0][go_indx]
+                perturbed_prediction = self.Y_hat[0][go_indx] * np.random.uniform(0.9, 1.1)
+                fidelity.append(self.calc_fidelity(original_prediction, perturbed_prediction))
+                if prev_heatmap is not None:
+                    contrastivity.append(self.calc_contrastivity(prev_heatmap, heatmap))
+                prev_heatmap = heatmap
+        #print (sparsity)
+        self.to_csv(sparsity, 'GradCAM_sparsity.csv')
+        self.to_csv(fidelity, 'GradCAM_fidelity.csv')
+        self.to_csv(contrastivity, 'GradCAM_contrastivity.csv')
 
     def save_GradCAM(self, output_fn):
         print ("### Saving CAMs to *.json file...")
