@@ -21,6 +21,8 @@ if __name__ == "__main__":
     parser.add_argument('--saliency', help="Compute saliency maps for every protein and every MF-GO term/EC number.", action="store_true")
     parser.add_argument('--deepfool', help="Run DeepFool analysis.", action="store_true")  # New argument for DeepFool
     parser.add_argument('--plot', type=str, help="Path to save the plot image for DeepFool.")
+    parser.add_argument('--fidelity', type=str, help="run fidelity")
+    parser.add_argument('--contrastivity', type=str, help='run contrastivity')
     args = parser.parse_args()
 
     with open(args.model_config) as json_file:

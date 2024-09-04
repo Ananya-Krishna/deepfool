@@ -12,6 +12,7 @@ import tensorflow as tf
 from .utils import load_catalogue, load_FASTA, load_predicted_PDB, seq2onehot
 from .layers import MultiGraphConv, GraphConv, FuncPredictor, SumPooling
 
+FIDELITY = True
 
 # +
 class GradCAM(object):
@@ -252,13 +253,16 @@ class Predictor(object):
         fidelity = np.abs(original_prediction - perturbed_prediction)
         return np.mean(fidelity)
     
-    def rescale_saliency_map(saliency_map, target_length):
-        x_original = np.linspace(0, 1, len(saliency_map))
-        x_target = np.linspace(0, 1, target_length)
-        f = interp1d(x_original, saliency_map, kind='linear')
-        return f(x_target)
+    
 
     def calc_contrastivity(self, saliency_list_1, saliency_list_2):
+
+        def rescale_saliency_map(saliency_map, target_length):
+            x_original = np.linspace(0, 1, len(saliency_map))
+            x_target = np.linspace(0, 1, target_length)
+            f = interp1d(x_original, saliency_map, kind='linear')
+            return f(x_target)
+    
         max_length = max(len(saliency_list_1), len(saliency_list_2))
         rescaled_map_1 = rescale_saliency_map(saliency_list_1, max_length)
         rescaled_map_2 = rescale_saliency_map(saliency_list_2, max_length)
@@ -285,6 +289,7 @@ class Predictor(object):
             print ("### Computing gradCAM for ", self.gonames[go_indx], '... [# proteins=', len(pred_chains), ']')
             prev_heatmap = None
             for chain in pred_chains:
+                print(chain)
                 if chain not in self.pdb2cam:
                     self.pdb2cam[chain] = {}
                     self.pdb2cam[chain]['GO_ids'] = []
@@ -296,17 +301,44 @@ class Predictor(object):
                 self.pdb2cam[chain]['sequence'] = self.data[chain][1]
                 heatmap = gradcam.heatmap(self.data[chain][0], go_indx, use_guided_grads=use_guided_grads).tolist()
                 self.pdb2cam[chain]['saliency_maps'].append(heatmap)
+                ##SPARSITY
                 sparsity.append(self.calc_sparsity(heatmap))
-                original_prediction = self.Y_hat[0][go_indx]
-                perturbed_prediction = self.Y_hat[0][go_indx] * np.random.uniform(0.9, 1.1)
-                fidelity.append(self.calc_fidelity(original_prediction, perturbed_prediction))
+                ###FIDELITY
+                if FIDELITY == True:
+                    original_prediction = self.Y_hat[0][go_indx]
+                    test_chain = ''
+                    for idx in range(len(self.data[chain][1])):
+                        if heatmap[idx] <=0.3:
+                            test_chain = test_chain + str(self.data[chain][1][idx])
+                        else:
+                            test_chain = test_chain + 'X'
+                    print('Chain: ')
+                    print(test_chain)
+                    self.predict(test_chain)
+                    if test_chain not in self.pdb2cam:
+                        self.pdb2cam[test_chain] = {}
+                        self.pdb2cam[test_chain]['GO_ids'] = []
+                        self.pdb2cam[test_chain]['GO_names'] = []
+                        self.pdb2cam[test_chain]['sequence'] = None
+                        self.pdb2cam[test_chain]['saliency_maps'] = []
+                    self.pdb2cam[test_chain]['GO_ids'].append(self.goterms[go_indx])
+                    self.pdb2cam[test_chain]['GO_names'].append(self.gonames[go_indx])
+                    self.pdb2cam[test_chain]['sequence'] = test_chain
+                    test_heatmap = gradcam.heatmap(self.data[test_chain][1], go_indx, use_guided_grads=use_guided_grads).tolist()
+                    self.pdb2cam[test_chain]['saliency_maps'].append(test_heatmap)
+                    perturbed_prediction = self.Y_hat[0][go_indx]
+                    
+                    fidelity.append(self.calc_fidelity(original_prediction, perturbed_prediction))
+
                 if prev_heatmap is not None:
-                    contrastivity.append(self.calc_contrastivity(prev_heatmap, heatmap))
+                    contrastivity.append(prev_heatmap)
                 prev_heatmap = heatmap
+            for chain in pred_chains:
+                contrastivity_values = [self.calc_contrastivity(a, b) for idx, a in enumerate(contrastivity) for b in contrastivity[idx+1:]]
         #print (sparsity)
         self.to_csv(sparsity, 'GradCAM_sparsity.csv')
         self.to_csv(fidelity, 'GradCAM_fidelity.csv')
-        self.to_csv(contrastivity, 'GradCAM_contrastivity.csv')
+        self.to_csv(contrastivity_values, 'GradCAM_contrastivity.csv')
 
     def save_GradCAM(self, output_fn):
         print ("### Saving CAMs to *.json file...")
